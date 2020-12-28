@@ -8,6 +8,7 @@ import gc
 from ..regularization import BaseComboRegularization, Sparse
 from ..data_misfit import BaseDataMisfit
 from ..objective_function import BaseObjectiveFunction
+import time
 
 
 def dask_getFields(self, m, store=False, deleteWarmstart=True):
@@ -50,6 +51,7 @@ def dask_getFields(self, m, store=False, deleteWarmstart=True):
                     f += []
 
     if isinstance(f, Future) or isinstance(f[0], Future):
+        print('[info] in futures fields')
         f = client.gather(f)
 
     if deleteWarmstart:
@@ -108,12 +110,13 @@ def get_dpred(self, m, f=None, compute_J=False):
                 else:
                     vec = m
 
-                future = client.compute(objfct.simulation.dpred(vec, compute_J=compute_J), workers=objfct.workers)
+                future = client.submit(objfct.simulation.dpred, vec)
                 dpreds += [future]
             else:
                 dpreds += []
 
     if isinstance(dpreds[0], Future):
+        print('[info] in futures of dpred')
         return client.gather(dpreds)
     else:
         return dpreds
@@ -134,7 +137,9 @@ def dask_evalFunction(self, m, return_g=True, return_H=True):
 
     # if isinstance(self.dmisfit, BaseDataMisfit):
     # phi_d = np.asarray(self.dmisfit(m, f=f))
+    time_dpred = time.time()
     self.dpred = self.get_dpred(m, compute_J=return_H)
+    print('[info] dpred: ', time.time() - time_dpred)
 
     phi_d = 0
     for objfct, pred in zip(self.dmisfit.objfcts, self.dpred):
@@ -143,7 +148,9 @@ def dask_evalFunction(self, m, return_g=True, return_H=True):
 
     phi_d = np.asarray(phi_d)
     # print(self.dpred[0])
+    time_deriv2 = time.time()
     self.reg2Deriv = self.reg.deriv2(m)
+    print('[info] deriv2: ', time.time() - time_deriv2)
     # reg = np.linalg.norm(self.reg2Deriv * self.reg._delta_m(m))
     phi_m = self.reg(m)
 
@@ -184,7 +191,9 @@ def dask_evalFunction(self, m, return_g=True, return_H=True):
 
     out = (phi,)
     if return_g:
+        time_deriv = time.time()
         phi_dDeriv = self.dmisfit.deriv(m, f=self.dpred)
+        print('[info] deriv return g: ', time.time() - time_deriv)
         phi_mDeriv = self.reg2Deriv * self.reg._delta_m(m)
 
         g = np.asarray(phi_dDeriv) + self.beta * phi_mDeriv
@@ -193,7 +202,9 @@ def dask_evalFunction(self, m, return_g=True, return_H=True):
     if return_H:
 
         def H_fun(v):
+            time_deriv2 = time.time()
             phi_d2Deriv = self.dmisfit.deriv2(m, v)
+            print('[info] deriv return h: ', time.time() - time_deriv2)
             phi_m2Deriv = self.reg2Deriv * v
             H = phi_d2Deriv + self.beta * phi_m2Deriv
 

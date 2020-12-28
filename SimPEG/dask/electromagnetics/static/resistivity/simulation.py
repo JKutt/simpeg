@@ -9,29 +9,40 @@ import dask.array as da
 import os
 import shutil
 import numpy as np
+import time
 
 Sim.sensitivity_path = './sensitivity/'
+
 
 def dask_fields(self, m=None, compute_J=False):
     if m is not None:
         self.model = m
-
+    strt = time.time()
     f = self.fieldsPair(self)
+    # print('[info] fields pair: ', time.time() - strt)
+    strt = time.time()
     A = self.getA()
+    # print('[info] getA done: ', time.time() - strt)
+    strt = time.time()
     Ainv = self.solver(A, **self.solver_opts)
+    # print('[info] setup solver done: ', time.time() - strt)
+    strt = time.time()
     RHS = self.getRHS()
-
+    # print('[info] rhs done: ', time.time() - strt)
+    strt = time.time()
     f[:, self._solutionType] = Ainv * RHS
-
+    print('[info] solve done: ', time.time() - strt)
+    strt = time.time()
     if compute_J:
         self.compute_J(f, Ainv)
+    print('[info] J formed: ', time.time() - strt)
     return f
 
 
 Sim.fields = dask_fields
 
 
-def dask_dpred(self, m=None, f=None, compute_J=False):
+def dask_dpred(self, m=None, f=None, compute_J=True):
     """
     dpred(m, f=None)
     Create the projected data from a model.
@@ -54,10 +65,11 @@ def dask_dpred(self, m=None, f=None, compute_J=False):
     if f is None:
         if m is None:
             m = self.model
-
+        strt = time.time()
         f = self.fields(m, compute_J=compute_J)
 
     data = Data(self.survey)
+    # strt = time.time()
     for src in self.survey.source_list:
         for rx in src.receiver_list:
             data[src, rx] = rx.eval(src, self.mesh, f)
@@ -90,10 +102,12 @@ def dask_compute_J(self, f, Ainv):
 
     m_size = self.model.size
     count = 0
+    dask_arrays = []
     for source in self.survey.source_list:
         u_source = f[source, self._solutionType]
         for rx in source.receiver_list:
             # wrt f, need possibility wrt m
+            strt = time.time()
             PTv = rx.getP(self.mesh, rx.projGLoc(f)).toarray().T
 
             df_duTFun = getattr(f, "_{0!s}Deriv".format(rx.projField), None)
@@ -107,53 +121,79 @@ def dask_compute_J(self, f, Ainv):
             nrows = int(
                 m_size / np.ceil(m_size * n_col * 8 * 1e-6 / self.max_chunk_size)
             )
-            ind = 0
-            for col in range(n_block_col):
-                ATinvdf_duT = da.asarray(
-                    Ainv * df_duT[:, ind : ind + n_col]
-                ).rechunk((nrows, n_col))
+            # ind = 0
+            # print('[info] getP done: ', time.time() - strt)
+            strt = time.time()
+            ATinvdf_duT = Ainv * df_duT
+            # print('[info] ATinvdf_duT done: ', time.time() - strt)
+            # strt = time.time()
+            dA_dmT = self.getADeriv(u_source, ATinvdf_duT, adjoint=True)
 
-                dA_dmT = self.getADeriv(u_source, ATinvdf_duT, adjoint=True)
+            dRHS_dmT = self.getRHSDeriv(source, ATinvdf_duT, adjoint=True)
 
-                dRHS_dmT = self.getRHSDeriv(source, ATinvdf_duT, adjoint=True)
+            du_dmT = da.from_delayed(
+                    dask.delayed(-dA_dmT), shape=(m_size, n_col), dtype=float
+            )
+            if not isinstance(dRHS_dmT, Zero):
+                du_dmT += da.from_delayed(
+                    dask.delayed(dRHS_dmT), shape=(m_size, rx.nD), dtype=float
+                )
+            if not isinstance(df_dmT, Zero):
+                du_dmT += da.from_delayed(
+                    df_dmT, shape=(m_size, rx.nD), dtype=float
+                )
+            dask_arrays.append(du_dmT.T)
+            del ATinvdf_duT
+            # print('[info] blockin rx done: ', time.time() - strt)
+            # strt = time.time()
+            # for col in range(n_block_col):
+            #     ATinvdf_duT = da.asarray(
+            #         Ainv * df_duT[:, ind : ind + n_col]
+            #     ).rechunk((nrows, n_col))
 
-                if n_col > 1:
-                    du_dmT = da.from_delayed(
-                        dask.delayed(-dA_dmT), shape=(m_size, n_col), dtype=float
-                    )
-                else:
-                    du_dmT = da.from_delayed(
-                        dask.delayed(-dA_dmT), shape=(m_size,), dtype=float
-                    )
+            #     dA_dmT = self.getADeriv(u_source, ATinvdf_duT, adjoint=True)
 
-                if not isinstance(dRHS_dmT, Zero):
-                    du_dmT += da.from_delayed(
-                        dask.delayed(dRHS_dmT), shape=(m_size, n_col), dtype=float
-                    )
+            #     dRHS_dmT = self.getRHSDeriv(source, ATinvdf_duT, adjoint=True)
 
-                if not isinstance(df_dmT, Zero):
-                    du_dmT += da.from_delayed(
-                        df_dmT, shape=(m_size, n_col), dtype=float
-                    )
+            #     if n_col > 1:
+            #         du_dmT = da.from_delayed(
+            #             dask.delayed(-dA_dmT), shape=(m_size, n_col), dtype=float
+            #         )
+            #     else:
+            #         du_dmT = da.from_delayed(
+            #             dask.delayed(-dA_dmT), shape=(m_size,), dtype=float
+            #         )
 
-                blockName = self.sensitivity_path + "J" + str(count) + ".zarr"
-                da.to_zarr((du_dmT.T).rechunk("auto"), blockName)
-                del ATinvdf_duT
-                count += 1
+            #     if not isinstance(dRHS_dmT, Zero):
+            #         du_dmT += da.from_delayed(
+            #             dask.delayed(dRHS_dmT), shape=(m_size, n_col), dtype=float
+            #         )
 
-                ind += n_col
+            #     if not isinstance(df_dmT, Zero):
+            #         du_dmT += da.from_delayed(
+            #             df_dmT, shape=(m_size, n_col), dtype=float
+            #         )
 
-    dask_arrays = []
-    for ii in range(count):
-        blockName = self.sensitivity_path + "J" + str(ii) + ".zarr"
-        J = da.from_zarr(blockName)
-        # Stack all the source blocks in one big zarr
-        dask_arrays.append(J)
+            #     # blockName = self.sensitivity_path + "J" + str(count) + ".zarr"
+            #     # da.to_zarr((du_dmT.T).rechunk("auto"), blockName)
+            #     dask_arrays.append(du_dmT.T)
+            #     del ATinvdf_duT
+            #     count += 1
 
-    rowChunk, colChunk = compute_chunk_sizes(
-        self.survey.nD, m_size, self.max_chunk_size
-    )
-    self._Jmatrix = da.vstack(dask_arrays).rechunk((rowChunk, colChunk))
+            #     ind += n_col
+            # print('[info] blockin rx done: ', time.time() - strt)
+    # dask_arrays = []
+    # for ii in range(count):
+    #     blockName = self.sensitivity_path + "J" + str(ii) + ".zarr"
+    #     J = da.from_zarr(blockName)
+    #     # Stack all the source blocks in one big zarr
+    #     dask_arrays.append(J)
+
+    # rowChunk, colChunk = compute_chunk_sizes(
+    #     self.survey.nD, m_size, self.max_chunk_size
+    # )
+    # self._Jmatrix = da.vstack(dask_arrays).rechunk((rowChunk, colChunk))
+    self._Jmatrix = da.vstack(dask_arrays)
     Ainv.clean()
 
     return self._Jmatrix

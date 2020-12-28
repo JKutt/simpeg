@@ -524,6 +524,69 @@ class Simulation3DNodal(BaseDCSimulation):
         # return qDeriv
         return Zero()
 
+    def dask_fields(self, m=None, compute_J=False):
+        if m is not None:
+            self.model = m
+        # strt = time.time()
+        f = self.fieldsPair(self)
+        # print('[info] fields pair: ', time.time() - strt)
+        # strt = time.time()
+        A = self.getA()
+        # print('[info] getA done: ', time.time() - strt)
+        # strt = time.time()
+        Ainv = self.solver(A, **self.solver_opts)
+        # print('[info] setup solver done: ', time.time() - strt)
+        # strt = time.time()
+        RHS = self.getRHS()
+        # print('[info] rhs done: ', time.time() - strt)
+        # strt = time.time()
+        f[:, self._solutionType] = Ainv * RHS
+        # print('[info] solve done: ', time.time() - strt)
+        # strt = time.time()
+        if compute_J:
+            self.compute_J(f, Ainv)
+        # print('[info] J formed: ', time.time() - strt)
+        return f
+
+
+    fields = dask_fields
+
+    def dask_dpred(self, m=None, f=None, compute_J=True):
+        """
+        dpred(m, f=None)
+        Create the projected data from a model.
+        The fields, f, (if provided) will be used for the predicted data
+        instead of recalculating the fields (which may be expensive!).
+
+        .. math::
+
+            d_\\text{pred} = P(f(m))
+
+        Where P is a projection of the fields onto the data space.
+        """
+        if self.survey is None:
+            raise AttributeError(
+                "The survey has not yet been set and is required to compute "
+                "data. Please set the survey for the simulation: "
+                "simulation.survey = survey"
+            )
+        print("[info] fields start")
+        if f is None:
+            if m is None:
+                m = self.model
+            # strt = time.time()
+            f = self.fields(m, compute_J=compute_J)
+        print("[info] fields done")
+        data = Data(self.survey)
+        # strt = time.time()
+        for src in self.survey.source_list:
+            for rx in src.receiver_list:
+                data[src, rx] = rx.eval(src, self.mesh, f)
+        return mkvc(data)
+
+
+    dpred = dask_dpred
+
 
 Simulation3DCellCentred = Simulation3DCellCentered  # UK and US!
 

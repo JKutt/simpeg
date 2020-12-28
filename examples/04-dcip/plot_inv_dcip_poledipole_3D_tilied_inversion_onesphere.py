@@ -446,7 +446,7 @@ def run(survey_type="pole-dipole", plotIt=True):
         if cnt == 10 or ii == len(survey.source_list)-1:
             src_collect.append(source)        
             idx_end = idx_end + source.receiver_list[0].nD
-            dobs = survey_dc.dobs[idx_start:idx_end]
+            # dobs = survey_dc.dobs[idx_start:idx_end]
     #         print(dobs.shape, len(src_collect))
             delayed_misfit = create_tile_dc(
                         src_collect,  survey.dobs[idx_start:idx_end],
@@ -478,7 +478,7 @@ def run(survey_type="pole-dipole", plotIt=True):
     global_misfit = objective_function.ComboObjectiveFunction(
                     local_misfits
             )
-    print(len(local_misfits))
+    print("[info] number of misfit functions: ", len(local_misfits))
     # m0_dc = np.ones(activeCells.sum()) * np.log(1. / np.median(patch.getApparentResistivity()))
     m0_dc = np.log(global_mesh.vol[active_cells])
     # Plot the model on different meshes
@@ -645,13 +645,19 @@ def run(survey_type="pole-dipole", plotIt=True):
         invProb, directiveList=directiveList)
     opt.LSshorten = 0.5
     opt.remember('xc')
+    print("[info] calc dpreds")
+    time_dpred = time.time()
+    outputs = invProb.get_dpred(m0_dc, compute_J=True)
+    print('[info] time to dpred: ', time.time() - time_dpred)
+    plt.plot(outputs[0], '.')
+    plt.show()
 
-    # Run Inversion ================================================================
-    minv = inv.run(m0_dc)
-    rho_est = mapactive * minv
-    # np.save('model_out.npy', rho_est)
+    # # Run Inversion ================================================================
+    # minv = inv.run(m0_dc)
+    # rho_est = mapactive * minv
+    # # np.save('model_out.npy', rho_est)
 
-    global_mesh.writeUBC('OctreeMesh-test.msh', models={'ubc.con': np.exp(rho_est)})
+    # global_mesh.writeUBC('OctreeMesh-test.msh', models={'ubc.con': np.exp(rho_est)})
 
 
 if __name__ == '__main__':
