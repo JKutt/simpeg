@@ -9,6 +9,7 @@ from ..regularization import BaseComboRegularization, Sparse
 from ..data_misfit import BaseDataMisfit
 from ..objective_function import BaseObjectiveFunction
 import time
+from mpi4py import MPI
 
 
 def dask_getFields(self, m, store=False, deleteWarmstart=True):
@@ -98,28 +99,66 @@ BaseInvProblem.getFields = dask_getFields
 def get_dpred(self, m, f=None, compute_J=False):
     dpreds = []
     client = get_client()
+    comm = MPI.COMM_WORLD
+    rank = comm.Get_rank()
 
-    if isinstance(self.dmisfit, BaseDataMisfit):
-        return self.dmisfit.simulation.dpred(m)
-    elif isinstance(self.dmisfit, BaseObjectiveFunction):
-
-        for i, objfct in enumerate(self.dmisfit.objfcts):
-            if hasattr(objfct, "simulation"):
-                if objfct.model_map is not None:
-                    vec = objfct.model_map @ m
-                else:
-                    vec = m
-
-                future = client.submit(objfct.simulation.dpred, vec)
-                dpreds += [future]
-            else:
-                dpreds += []
-
-    if isinstance(dpreds[0], Future):
-        print('[info] in futures of dpred')
-        return client.gather(dpreds)
+    if rank == 0:
+        time_dpred = time.time()
+        print('[info] well look at me! ', rank)
+        objfcts = self.dmisfit.objfcts
     else:
-        return dpreds
+        objfcts = None
+
+    objfct = comm.scatter(objfcts, root=0)
+    # print('rank: ', rank, ' has objective function with data size' objfct.simulation.survey.nD)
+    
+    if hasattr(objfct, "simulation"):
+        if objfct.model_map is not None:
+            vec = objfct.model_map @ m
+        else:
+            vec = m
+        print('[info]', 'rank: ', rank, ' hitting dpred ', objfct.simulation.survey.nD)
+        time_dpred_ = time.time()
+        # dpreds = client.compute(objfct.simulation.dpred(vec), workers=objfct.workers)
+        future = objfct.simulation.dpred(vec)
+        print('[info]', 'rank: ', rank, ' time dpred: ', time.time() - time_dpred_)
+        print(dpreds)
+    # else:
+    #     dpreds = []
+
+    future = comm.gather(dpreds, root=0)
+
+    if comm.rank == 0:
+        print('[info] time to gather: ', time.time() - time_dpred)
+        # plt.plot(future[0], '.')
+        # plt.show()
+        return future
+    else:
+        future = None
+    
+    # if isinstance(self.dmisfit, BaseDataMisfit):
+    #     return self.dmisfit.simulation.dpred(m)
+    # elif isinstance(self.dmisfit, BaseObjectiveFunction):
+
+    #     for i, objfct in enumerate(self.dmisfit.objfcts):
+    #         if hasattr(objfct, "simulation"):
+    #             if objfct.model_map is not None:
+    #                 vec = objfct.model_map @ m
+    #             else:
+    #                 vec = m
+    #             time_dpred_ = time.time()
+    #             future = client.submit(objfct.simulation.dpred, vec, workers=objfct.workers)
+    #             # future = client.compute(objfct.simulation.dpred(vec), workers=objfct.workers)
+    #             dpreds += [future]
+    #             print('[info] time dpred: ', time.time() - time_dpred_)
+    #         else:
+    #             dpreds += []
+
+    # if isinstance(dpreds[0], Future):
+    #     print('[info] in futures of dpred')
+    #     return client.gather(dpreds)
+    # else:
+    #     return dpreds
 
 
 BaseInvProblem.get_dpred = get_dpred
