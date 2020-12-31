@@ -10,6 +10,7 @@ from ..data_misfit import BaseDataMisfit
 from ..objective_function import BaseObjectiveFunction
 import time
 from mpi4py import MPI
+import dask
 
 
 def dask_getFields(self, m, store=False, deleteWarmstart=True):
@@ -98,7 +99,7 @@ BaseInvProblem.getFields = dask_getFields
 
 def get_dpred(self, m, f=None, compute_J=False):
     dpreds = []
-    client = get_client()
+    # client = get_client()
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
 
@@ -111,7 +112,7 @@ def get_dpred(self, m, f=None, compute_J=False):
 
     objfct = comm.scatter(objfcts, root=0)
     # print('rank: ', rank, ' has objective function with data size' objfct.simulation.survey.nD)
-    
+   
     if hasattr(objfct, "simulation"):
         if objfct.model_map is not None:
             vec = objfct.model_map @ m
@@ -121,8 +122,9 @@ def get_dpred(self, m, f=None, compute_J=False):
         time_dpred_ = time.time()
         # dpreds = client.compute(objfct.simulation.dpred(vec), workers=objfct.workers)
         future = objfct.simulation.dpred(vec)
+        dpreds += [future]
         print('[info]', 'rank: ', rank, ' time dpred: ', time.time() - time_dpred_)
-        print(dpreds)
+        # print(dpreds)
     # else:
     #     dpreds = []
 
@@ -130,12 +132,13 @@ def get_dpred(self, m, f=None, compute_J=False):
 
     if comm.rank == 0:
         print('[info] time to gather: ', time.time() - time_dpred)
+        print('[info] num dpreds: ', future[0])
         # plt.plot(future[0], '.')
         # plt.show()
         return future
     else:
         future = None
-    
+   
     # if isinstance(self.dmisfit, BaseDataMisfit):
     #     return self.dmisfit.simulation.dpred(m)
     # elif isinstance(self.dmisfit, BaseObjectiveFunction):
@@ -147,8 +150,9 @@ def get_dpred(self, m, f=None, compute_J=False):
     #             else:
     #                 vec = m
     #             time_dpred_ = time.time()
-    #             future = client.submit(objfct.simulation.dpred, vec, workers=objfct.workers)
+    #             # future = client.submit(objfct.simulation.dpred, vec, workers=objfct.workers)
     #             # future = client.compute(objfct.simulation.dpred(vec), workers=objfct.workers)
+    #             future = dask.delayed(objfct.simulation.dpred)(vec)
     #             dpreds += [future]
     #             print('[info] time dpred: ', time.time() - time_dpred_)
     #         else:
@@ -158,7 +162,7 @@ def get_dpred(self, m, f=None, compute_J=False):
     #     print('[info] in futures of dpred')
     #     return client.gather(dpreds)
     # else:
-    #     return dpreds
+    #     return dask.compute(*dpreds, process=True)
 
 
 BaseInvProblem.get_dpred = get_dpred
