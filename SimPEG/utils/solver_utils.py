@@ -4,6 +4,9 @@ from scipy.sparse import linalg
 from .mat_utils import mkvc
 import warnings
 import inspect
+from sksparse.cholmod import cholesky
+from mpi4py import MPI
+import mumps
 
 
 def _checkAccuracy(A, b, X, accuracyTol):
@@ -17,6 +20,112 @@ def _checkAccuracy(A, b, X, accuracyTol):
         )
         print(msg)
         warnings.warn(msg, RuntimeWarning)
+
+
+def SolverWrapMUMPS(fun, factorize=True, name=None):
+    """
+    crude MUMPS
+    """
+    def __init__(self, A, **kwargs):
+        comm_mpi = MPI.COMM_WORLD
+        self.solver = mumps.DMumpsContext(sym=0, par=1, comm=comm_mpi)
+
+        # convert to coo
+        # print(a.shape, rhs.shape)
+        A = A.tocoo()
+        # print(a.shape, rhs.shape)
+        n = A.shape[0]
+        
+        # ctx = mumps.DMumpsContext(sym=0, par=1, comm=self.comm_mpi)
+        self.solver.set_silent() # Turn off verbose output
+        self.solver.set_icntl(28, 2) # to turn on parallelism for factorization 
+        self.solver.set_icntl(29, 2) # 1 for pt-scotch 2 for parametis
+        if self.solver.myid == 0:
+            # print(a_.row.dtype, b.shape, n, a_.row.size)
+            self.solver.set_shape(n)
+            # ctx.set_shape(5)
+            self.solver.id.nz = A.data.size
+            # ctx.set_centralized_assembled(irn, jcn, a)
+            self.solver.set_centralized_assembled_rows_cols(A.row+1, A.col+1)
+        self.solver.run(job=1) # Analysis
+
+        if self.solver.myid == 0:
+            self.solver.set_centralized_assembled_values(A.data)
+        if factorize:
+            self.solver.run(job=2) # Factorization
+
+    def __mul__(self,rhs):
+        if type(rhs) is not np.ndarray:
+            raise TypeError("Can only multiply by a numpy array.")
+        if len(rhs.shape) > 1:
+            b = rhs.flatten('F')
+        else:
+            b = rhs        
+        if self.solver.myid == 0:
+            x = b.copy()
+            self.solver.set_rhs(x)
+            if len(rhs.shape) > 1:
+                self.solver.id.nrhs = rhs.shape[1]
+                self.solver.id.lrhs = rhs.shape[0]
+            else:
+                self.solver.id.nrhs = 1
+                self.solver.id.lrhs = rhs.shape[0]
+
+        self.solver.run(job=3) # Analysis + Factorization + Solve
+        # self.ctx.destroy() # Free memory
+        if self.solver.myid == 0:
+            return x.reshape(rhs.shape, order='F')
+
+    def __matmul__(self, other):
+        return self * other
+
+    def clean(self):
+        self.solver.destroy() # Free memory
+
+    return type(
+        name if name is not None else fun.__name__,
+        (object,),
+        {
+            "__init__": __init__,
+            "clean": clean,
+            "__mul__": __mul__,
+            "__matmul__": __matmul__,
+        },
+    )
+
+
+def SolverWrapCHOLMOD(fun, factorize=True, name=None):
+    """
+    crude choldmod
+    """
+    def __init__(self, A, **kwargs):
+        self.A = A.tocsc()
+
+        if factorize:
+            self.solver = fun(self.A, ordering_method="metis")
+
+    def __mul__(self, b):
+        if type(b) is not np.ndarray:
+            raise TypeError("Can only multiply by a numpy array.")
+
+        return self.solver(b)
+
+    def __matmul__(self, other):
+        return self * other
+
+    def clean(self):
+        pass
+
+    return type(
+        name if name is not None else fun.__name__,
+        (object,),
+        {
+            "__init__": __init__,
+            "clean": clean,
+            "__mul__": __mul__,
+            "__matmul__": __matmul__,
+        },
+    )
 
 
 def SolverWrapD(fun, factorize=True, checkAccuracy=True, accuracyTol=1e-6, name=None):
@@ -199,6 +308,8 @@ def SolverWrapI(fun, checkAccuracy=True, accuracyTol=1e-5, name=None):
 
 
 Solver = SolverWrapD(linalg.spsolve, factorize=False, name="Solver")
+SolverCHOLMOD = SolverWrapCHOLMOD(cholesky, name="CHOLMOD")
+SolverMUMPS = SolverWrapMUMPS(linalg.spsolve, name="MUMPS")
 SolverLU = SolverWrapD(linalg.splu, factorize=True, name="SolverLU")
 SolverCG = SolverWrapI(linalg.cg, name="SolverCG")
 SolverBiCG = SolverWrapI(linalg.bicgstab, name="SolverBiCG")
