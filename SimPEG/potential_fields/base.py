@@ -36,6 +36,7 @@ class BasePFSimulation(LinearSimulation):
     def __init__(self, mesh, **kwargs):
 
         LinearSimulation.__init__(self, mesh, **kwargs)
+        self.solver = None  # Overload default solver
 
         # Find non-zero cells
         if getattr(self, "actInd", None) is not None:
@@ -128,6 +129,14 @@ class BasePFSimulation(LinearSimulation):
         raise RuntimeError(
             f"Integral calculations must implemented by the subclass {self}."
         )
+
+    @property
+    def solver(self):
+        return self._solver
+
+    @solver.setter
+    def solver(self, solver):
+        self._solver = solver
 
     @property
     def forwardOnly(self):
@@ -258,7 +267,7 @@ def get_dist_wgt(mesh, receiver_locations, actv, R, R0):
 
     # Create cell center location
     Ym, Xm, Zm = np.meshgrid(mesh.vectorCCy, mesh.vectorCCx, mesh.vectorCCz)
-    hY, hX, hZ = np.meshgrid(mesh.hy, mesh.hx, mesh.hz)
+    hY, hX, hZ = np.meshgrid(mesh.h[1], mesh.h[0], mesh.h[2])
 
     # Remove air cells
     Xm = P.T * mkvc(Xm)
@@ -269,7 +278,7 @@ def get_dist_wgt(mesh, receiver_locations, actv, R, R0):
     hY = P.T * mkvc(hY)
     hZ = P.T * mkvc(hZ)
 
-    V = P.T * mkvc(mesh.vol)
+    V = P.T * mkvc(mesh.cell_volumes)
     wr = np.zeros(nC)
 
     ndata = receiver_locations.shape[0]

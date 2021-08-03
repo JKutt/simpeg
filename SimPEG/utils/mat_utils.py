@@ -1,7 +1,7 @@
 from __future__ import division
 import numpy as np
 from .code_utils import deprecate_method
-
+from dask.distributed import Future
 from discretize.utils import (
     Zero,
     Identity,
@@ -141,7 +141,10 @@ def eigenvalue_by_power_iteration(combo_objfct, model, n_pw_iter=4, fields_list=
         fields_list = []
         for k, obj in enumerate(combo_objfct.objfcts):
             if hasattr(obj, "simulation"):
-                fields_list += [obj.simulation.fields(model)]
+                if getattr(obj, "model_map", None) is None:
+                    fields_list += [obj.simulation.fields(model)]
+                else:
+                    fields_list += [obj.simulation.fields(obj.model_map * model)]
             else:
                 # required to put None to conserve it in the list
                 # The idea is that the function can have a mixed of dmis and reg terms
@@ -156,6 +159,8 @@ def eigenvalue_by_power_iteration(combo_objfct, model, n_pw_iter=4, fields_list=
         for j, (mult, obj) in enumerate(zip(combo_objfct.multipliers, combo_objfct.objfcts)):
             if hasattr(obj, "simulation"): # if data misfit term
                 aux = obj.deriv2(model, v=x0, f=fields_list[j])
+                if isinstance(aux, Future):
+                    aux = aux.result()
                 if not isinstance(aux, Zero):
                     x1 += mult * aux
             else:
@@ -168,7 +173,11 @@ def eigenvalue_by_power_iteration(combo_objfct, model, n_pw_iter=4, fields_list=
     eigenvalue=0.
     for j, (mult, obj) in enumerate(zip(combo_objfct.multipliers, combo_objfct.objfcts)):
         if hasattr(obj, "simulation"): # if data misfit term
-            eigenvalue += mult * x0.dot(obj.deriv2(model, v=x0, f=fields_list[j]))
+            aux = obj.deriv2(model, v=x0, f=fields_list[j])
+            if isinstance(aux, Future):
+                aux = aux.result()
+
+            eigenvalue += mult * x0.dot(aux)
         else:
             eigenvalue += mult * x0.dot(obj.deriv2(model, v=x0,))
 

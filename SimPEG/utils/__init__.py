@@ -1,6 +1,6 @@
 from __future__ import print_function
 
-from discretize.utils.interputils import interpmat
+from discretize.utils import interpmat
 
 from .mat_utils import (
     mkvc,
@@ -52,7 +52,7 @@ from .counter_utils import Counter, count, timeIt
 from . import model_builder
 from . import solver_utils
 from .coord_utils import rotatePointsFromNormals, rotationMatrixFromNormals
-from .model_utils import surface2ind_topo
+from .model_utils import surface2ind_topo, tile_locations
 from .plot_utils import plot2Ddata, plotLayer
 from .io_utils import download
 from . import io_utils

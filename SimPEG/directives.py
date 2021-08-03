@@ -5,6 +5,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import warnings
 import os
+import json
 from .data_misfit import BaseDataMisfit
 from .objective_function import ComboObjectiveFunction
 from .maps import SphericalSystem, ComboMap
@@ -31,6 +32,7 @@ from .utils import (
     eigenvalue_by_power_iteration,
 )
 from .utils.code_utils import deprecate_property
+from discretize import TensorMesh, TreeMesh
 
 
 class InversionDirective(properties.HasProperties):
@@ -204,6 +206,7 @@ class BetaEstimate_ByEig(InversionDirective):
     beta0_ratio = 1.  #: the estimated ratio is multiplied by this to obtain beta
     n_pw_iter = 4     #: number of power iterations for estimation.
     seed = None       #: Random seed for the directive
+    method = "power_iteration"
 
     def initialize(self):
         """
@@ -238,15 +241,25 @@ class BetaEstimate_ByEig(InversionDirective):
 
         m = self.invProb.model
 
-        dm_eigenvalue = eigenvalue_by_power_iteration(
-            self.dmisfit, m, n_pw_iter=self.n_pw_iter,
-        )
-        reg_eigenvalue = eigenvalue_by_power_iteration(
-            self.reg, m, n_pw_iter=self.n_pw_iter,
-        )
+        if self.method == "power_iteration":
+            dm_eigenvalue = eigenvalue_by_power_iteration(
+                self.dmisfit, m, n_pw_iter=self.n_pw_iter,
+            )
+            reg_eigenvalue = eigenvalue_by_power_iteration(
+                self.reg, m, n_pw_iter=self.n_pw_iter,
+            )
+            self.ratio = (dm_eigenvalue / reg_eigenvalue)
+        else:
+            x0 = np.random.rand(*m.shape)
+            phi_d_deriv = self.dmisfit.deriv2(m, x0)
+            t = np.dot(x0, phi_d_deriv)
+            reg = self.reg.deriv2(m, v=x0)
+            b = np.dot(x0, reg)
 
-        self.ratio = (dm_eigenvalue / reg_eigenvalue)
+            self.ratio = np.asarray(t / b)
+
         self.beta0 = self.beta0_ratio * self.ratio
+
 
         self.invProb.beta = self.beta0
 
@@ -793,6 +806,288 @@ class SaveOutputDictEveryIteration(SaveEveryIteration):
         self.outDict[self.opt.iter] = iterDict
 
 
+class SaveUBCModelEveryIteration(SaveEveryIteration):
+    """SaveModelEveryIteration"""
+
+    replace = True
+    saveComp = True
+    mapping = None
+    vector = False
+    mesh = None
+    file_name = "Model"
+
+    def initialize(self):
+
+        if getattr(self, "mapping", None) is None:
+            return self.mapPair()
+        print(
+            "SimPEG.SaveModelEveryIteration will save your models"
+            + f" in UBC format as: '###-{self.file_name!s}.mod'"
+        )
+
+    def endIter(self):
+
+        if not self.replace:
+            fileName = self.file_name + f"_{self.opt.iter}"
+        else:
+            fileName = self.file_name
+
+        for prob, survey, reg in zip(self.prob, self.survey, self.reg.objfcts):
+
+            xc = self.mapping * self.opt.xc
+
+            if not self.vector:
+
+                if isinstance(self.mesh, TreeMesh):
+                    TreeMesh.writeUBC(
+                        self.mesh, self.file_name + ".msh", models={fileName + ".mod": xc}
+                    )
+
+                else:
+                    TensorMesh.writeModelUBC(self.mesh, fileName + ".mod", xc)
+            else:
+
+                nC = self.mesh.nC
+
+                if prob.coordinate_system == "spherical":
+                    vec_xyz = spherical2cartesian(
+                        xc.reshape((int(len(xc) / 3), 3), order="F")
+                    )
+                    theta = xc[nC : 2 * nC]
+                    phi = xc[2 * nC :]
+                else:
+                    vec_xyz = xc
+                    atp = cartesian2spherical(
+                        xc.reshape((int(len(xc) / 3), 3), order="F")
+                    )
+                    theta = atp[nC : 2 * nC]
+                    phi = atp[2 * nC :]
+
+                vec_x = vec_xyz[:nC]
+                vec_y = vec_xyz[nC : 2 * nC]
+                vec_z = vec_xyz[2 * nC :]
+
+                vec = np.c_[vec_x, vec_y, vec_z]
+
+                if self.saveComp:
+                    if isinstance(self.mesh, TreeMesh):
+                        TreeMesh.writeUBC(
+                            self.mesh,
+                            self.file_name + ".msh",
+                            models={
+                                fileName + ".dip": (np.rad2deg(theta)),
+                                fileName + ".azm": ((450 - np.rad2deg(phi)) % 360),
+                                fileName + "_TOT.mod": np.sum(vec ** 2, axis=1) ** 0.5,
+                            },
+                        )
+
+                    else:
+                        TensorMesh.writeModelUBC(
+                            self.mesh, fileName + ".dip", (np.rad2deg(theta))
+                        )
+                        TensorMesh.writeModelUBC(
+                            self.mesh, fileName + ".azm", (450 - np.rad2deg(phi)) % 360
+                        )
+                        TensorMesh.writeModelUBC(
+                            self.mesh,
+                            fileName + "_TOT.mod",
+                            np.sum(vec ** 2, axis=1) ** 0.5,
+                        )
+
+
+class SavePredictedEveryIteration(SaveEveryIteration):
+    """SaveModelEveryIteration"""
+
+    replace = True
+    data = None
+    file_name = "Predicted"
+    data_type = None
+
+    def initialize(self):
+
+        if self.data_type == 'ubc_dc':
+            from SimPEG.electromagnetics.static import utils as dc_utils
+
+        if getattr(self, "data_type", None) is not None:
+            assert self.data_type in ['ubc_dc', None], "data_type must be one of None or 'ubc_dc'"
+        print(
+            "SimPEG.SavePredictedEveryIteration will save your predicted"
+            + f" in UBC format as: '###-{self.file_name!s}.mod'"
+        )
+
+        if getattr(self.invProb, "dpred", None) is not None:
+            dpred = np.hstack(self.invProb.dpred)
+            if self.data_type == 'ubc_dc':
+                dc_utils.writeUBC_DCobs(f"{self.file_name}_0.pre", self.data, 3, "surface", data=dpred, predicted=True)
+            else:
+                np.savetxt(f"{self.file_name}_0.pre", np.c_[self.data.survey.locations, dpred])
+
+    def endIter(self):
+        if not self.replace:
+            file_name = self.file_name + f"_{self.opt.iter}"
+        else:
+            file_name = self.file_name
+
+        dpred = np.hstack(self.invProb.dpred)
+        if self.data_type == 'ubc_dc':
+            from SimPEG.electromagnetics.static import utils as dc_utils
+            dc_utils.writeUBC_DCobs(f"{file_name}.pre", self.data, 3, "surface", data=dpred, predicted=True)
+        else:
+            np.savetxt(f"{file_name}.pre", np.c_[self.data.survey.locations, dpred])
+
+
+class SaveIterationsGeoH5(InversionDirective):
+    """
+    Saves inversion results to a geoh5 file
+    """
+
+    association = "VERTEX"
+    attribute_type = "model"
+    channels = [""]
+    components = [""]
+    data_type = {}
+    h5_object = None
+    mapping = None
+    save_objective_function = False
+    sorting = None
+
+    def initialize(self):
+
+        if self.attribute_type == "predicted":
+            prop = np.hstack(self.invProb.get_dpred(self.invProb.model))
+        else:
+            prop = self.invProb.model
+
+        if self.mapping is not None:
+            prop = self.mapping * prop
+
+        if self.sorting is not None:
+            prop = prop[self.sorting]
+
+        if self.attribute_type == "vector":
+            prop = np.linalg.norm(prop.reshape((-1, 3), order="F"), axis=1)
+        else:
+            prop = prop.reshape((len(self.channels), len(self.components), -1))
+
+        for cc, component in enumerate(self.components):
+            for ii, channel in enumerate(self.channels):
+                if not isinstance(channel, str):
+                    channel = f"{channel: .2e}"
+                values = prop[ii, cc, :]
+                data = self.h5_object.add_data(
+                    {
+                        f"Iteration_{0}_{component}_{channel}":
+                        {"association": self.association, "values": values}
+                    }
+                )
+                data.entity_type.name = channel
+                self.data_type[channel] = data.entity_type
+
+                if len(self.channels) > 1:
+                    self.h5_object.add_data_to_group(
+                        data, f"Iteration_{0}_{component}"
+                    )
+
+        if self.save_objective_function:
+            regCombo = ["phi_ms", "phi_msx", "phi_msy", "phi_msz"]
+
+            # Save the data.
+            iterDict = {"beta": f"{self.invProb.beta:.3e}"}
+            iterDict["phi_d"] = f"{self.invProb.phi_d:.3e}"
+            iterDict["phi_m"] = f"{self.invProb.phi_m:.3e}"
+
+            for label, fcts in zip(regCombo, self.reg.objfcts[0].objfcts):
+                iterDict[label] = f"{fcts(self.invProb.model):.3e}"
+
+            self.h5_object.parent.add_comment(
+                json.dumps(iterDict), author=f"Iteration_{0}"
+            )
+
+        self.h5_object.workspace.finalize()
+
+    def endIter(self):
+
+        if self.attribute_type == "predicted":
+            prop = np.hstack(self.invProb.dpred)
+        else:
+            prop = self.invProb.model
+
+        if self.mapping is not None:
+            prop = self.mapping * prop
+
+        if self.sorting is not None:
+            prop = prop[self.sorting]
+
+        if self.attribute_type == "vector":
+            prop = np.linalg.norm(prop.reshape((-1, 3), order="F"), axis=1)
+        else:
+            prop = prop.reshape((len(self.channels), len(self.components), -1))
+
+        for cc, component in enumerate(self.components):
+            for ii, channel in enumerate(self.channels):
+                values = prop[ii, cc, :]
+                if not isinstance(channel, str):
+                    channel = f"{channel: .2e}"
+                data = self.h5_object.add_data(
+                    {
+                        f"Iteration_{self.opt.iter}_{component}_{channel}":
+                            {
+                                "values": values,
+                                "association": self.association,
+                                "entity_type": self.data_type[channel],
+                            }
+                    }
+                )
+
+                if len(self.channels) > 1:
+                    self.h5_object.add_data_to_group(
+                        data, f"Iteration_{self.opt.iter}_{component}"
+                    )
+
+        if self.save_objective_function:
+            regCombo = ["phi_ms", "phi_msx", "phi_msy", "phi_msz"]
+
+            # Save the data.
+            iterDict = {"beta": f"{self.invProb.beta:.3e}"}
+            iterDict["phi_d"] = f"{self.invProb.phi_d:.3e}"
+            iterDict["phi_m"] = f"{self.invProb.phi_m:.3e}"
+
+            for label, fcts in zip(regCombo, self.reg.objfcts[0].objfcts):
+                iterDict[label] = f"{fcts(self.invProb.model):.3e}"
+
+            self.h5_object.parent.add_comment(
+                json.dumps(iterDict), author=f"Iteration_{self.opt.iter}"
+            )
+
+        self.h5_object.workspace.finalize()
+
+    def check_mvi_format(self, values):
+        if "mvi" in self.attribute:
+            values = values.reshape((-1, 3), order="F")
+            if self.no_data_value is not None:
+                ndv_ind = values[:, 0] == self.no_data_value
+                values[ndv_ind, :] = 0
+            else:
+                ndv_ind = np.zeros(values.shape[0], dtype="bool")
+
+            if self.attribute == "mvi_model":
+                values = np.linalg.norm(values, axis=1)
+            elif self.attribute == "mvi_model_s":
+                values = values[:, 0]
+            elif self.attribute == "mvi_angles":
+                atp = cartesian2spherical(values)
+                values = atp.reshape((-1, 3), order="F")
+
+            if "model" in self.attribute:
+                values[ndv_ind] = self.no_data_value
+            elif "angles" in self.attribute:
+                values = np.rad2deg(values[:, 1:])
+                values[ndv_ind, :] = self.no_data_value
+                values = values.ravel()
+
+        return values
+
+
 class Update_IRLS(InversionDirective):
 
     f_old = 0
@@ -807,6 +1102,7 @@ class Update_IRLS(InversionDirective):
     irls_iteration = 0
     minGNiter = 1
     max_irls_iterations = properties.Integer("maximum irls iterations", default=20)
+    max_beta_iterations = properties.Integer("maximum beta iterations", default=20)
     iterStart = 0
     sphericalDomain = False
 
@@ -881,9 +1177,8 @@ class Update_IRLS(InversionDirective):
                 reg.norms = np.c_[2.0, 2.0, 2.0, 2.0]
                 reg.model = self.invProb.model
 
-        # Update the model used by the regularization
-        for reg in self.reg.objfcts:
-            reg.model = self.invProb.model
+                for comp in reg.objfcts:
+                    comp.model = self.invProb.model
 
         if self.sphericalDomain:
             self.angleScale()
@@ -938,7 +1233,8 @@ class Update_IRLS(InversionDirective):
         # Update the model used by the regularization
         phi_m_last = []
         for reg in self.reg.objfcts:
-            reg.model = self.invProb.model
+            for comp in reg.objfcts:
+                comp.model = self.invProb.model
             phi_m_last += [reg(self.invProb.model)]
 
         # After reaching target misfit with l2-norm, switch to IRLS (mode:2)
@@ -1007,10 +1303,16 @@ class Update_IRLS(InversionDirective):
                 self.opt.stopNextIteration = True
                 return
 
+
             self.f_old = phim_new
 
             self.update_beta = True
             self.invProb.phi_m_last = self.reg(self.invProb.model)
+
+        if self.opt.iter > self.max_beta_iterations:
+            print("Reached max beta iterations.")
+            self.opt.stopNextIteration = True
+            return
 
     def startIRLS(self):
         if not self.silent:
@@ -1113,22 +1415,17 @@ class UpdatePreconditioner(InversionDirective):
             regDiag += reg.deriv2(m).diagonal()
 
         JtJdiag = np.zeros_like(self.invProb.model)
-        for sim, dmisfit in zip(self.simulation, self.dmisfit.objfcts):
-
-            if getattr(sim, "getJtJdiag", None) is None:
-                assert getattr(sim, "getJ", None) is not None, (
-                    "Simulation does not have a getJ attribute."
-                    + "Cannot form the sensitivity explicitly"
-                )
-                JtJdiag += np.sum(np.power((dmisfit.W * sim.getJ(m)), 2), axis=0)
-            else:
-                JtJdiag += sim.getJtJdiag(m, W=dmisfit.W)
+        for dmisfit in self.dmisfit.objfcts:
+            assert getattr(dmisfit.simulation, "getJtJdiag", None) is not None, (
+                "Simulation does not have a getJtJdiag attribute."
+                + "Cannot form the sensitivity explicitly"
+            )
+            JtJdiag += dmisfit.getJtJdiag(m)
 
         diagA = JtJdiag + self.invProb.beta * regDiag
         diagA[diagA != 0] = diagA[diagA != 0] ** -1.0
-        PC = sdiag((diagA))
 
-        self.opt.approxHinv = PC
+        self.opt.approxHinv = diagA
 
     def endIter(self):
         # Cool the threshold parameter
@@ -1144,16 +1441,12 @@ class UpdatePreconditioner(InversionDirective):
             regDiag += reg.deriv2(m).diagonal()
 
         JtJdiag = np.zeros_like(self.invProb.model)
-        for sim, dmisfit in zip(self.simulation, self.dmisfit.objfcts):
-
-            if getattr(sim, "getJtJdiag", None) is None:
-                assert getattr(sim, "getJ", None) is not None, (
-                    "Simulation does not have a getJ attribute."
-                    + "Cannot form the sensitivity explicitly"
-                )
-                JtJdiag += np.sum(np.power((dmisfit.W * sim.getJ(m)), 2), axis=0)
-            else:
-                JtJdiag += sim.getJtJdiag(m, W=dmisfit.W)
+        for dmisfit in self.dmisfit.objfcts:
+            assert getattr(dmisfit.simulation, "getJtJdiag", None) is not None, (
+                "Simulation does not have a getJtJdiag attribute."
+                + "Cannot form the sensitivity explicitly"
+            )
+            JtJdiag += dmisfit.getJtJdiag(m)
 
         diagA = JtJdiag + self.invProb.beta * regDiag
         diagA[diagA != 0] = diagA[diagA != 0] ** -1.0
@@ -1198,7 +1491,7 @@ class UpdateSensitivityWeights(InversionDirective):
     mapping = None
     JtJdiag = None
     everyIter = True
-    threshold = 1e-12
+    threshold = None
     switch = True
 
     def initialize(self):
@@ -1231,21 +1524,30 @@ class UpdateSensitivityWeights(InversionDirective):
         """
         self.JtJdiag = []
         m = self.invProb.model
+        threshold = []
+        for ii, dmisfit in enumerate(self.dmisfit.objfcts):
+            assert getattr(dmisfit.simulation, "getJtJdiag", None) is not None, (
+                "Simulation does not have a getJtJdiag attribute."
+                + "Cannot form the sensitivity explicitly"
+            )
+            self.JtJdiag += [dmisfit.getJtJdiag(m)]
 
-        for sim, dmisfit in zip(self.simulation, self.dmisfit.objfcts):
+            if self.threshold is not None:
+                if isinstance(self.threshold, list):
+                    JtJdiag = self.threshold[ii]
+                else:
+                    JtJdiag = self.threshold
 
-            if getattr(sim, "getJtJdiag", None) is None:
-                assert getattr(sim, "getJ", None) is not None, (
-                    "Simulation does not have a getJ attribute."
-                    + "Cannot form the sensitivity explicitly"
-                )
+                if not isinstance(JtJdiag, np.ndarray):
+                    JtJdiag = np.ones_like(self.JtJdiag[ii]) * JtJdiag
 
-                self.JtJdiag += [
-                    mkvc(np.sum((dmisfit.W * sim.getJ(m)) ** (2.0), axis=0))
-                ]
             else:
-                self.JtJdiag += [sim.getJtJdiag(m, W=dmisfit.W)]
+                JtJdiag = self.JtJdiag[ii]
 
+            threshold += [JtJdiag]
+
+
+        self.threshold = threshold
         return self.JtJdiag
 
     def getWr(self):
@@ -1256,11 +1558,14 @@ class UpdateSensitivityWeights(InversionDirective):
 
         wr = np.zeros_like(self.invProb.model)
         if self.switch:
-            for prob_JtJ, sim, dmisfit in zip(
-                self.JtJdiag, self.simulation, self.dmisfit.objfcts
+            for prob_JtJ, sim, dmisfit, threshold in zip(
+                self.JtJdiag, self.simulation, self.dmisfit.objfcts, self.threshold
             ):
 
-                wr += prob_JtJ + self.threshold
+                wr += prob_JtJ
+
+            wr = np.max(np.c_[wr, threshold], axis=1)
+
 
             wr = wr ** 0.5
             wr /= wr.max()

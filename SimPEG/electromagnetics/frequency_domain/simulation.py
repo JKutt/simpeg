@@ -6,7 +6,7 @@ from ...utils.code_utils import deprecate_class
 
 from ... import props
 from ...data import Data
-from ...utils import mkvc
+from ...utils import mkvc, Zero
 from ..base import BaseEMSimulation
 from ..utils import omega
 from .survey import Survey
@@ -64,6 +64,8 @@ class BaseFDEMSimulation(BaseEMSimulation):
 
     survey = properties.Instance("a survey object", Survey, required=True)
 
+    storeJ = properties.Bool("store the sensitivity matrix?", default=False)
+
     def fields(self, m=None):
         """
         Solve the forward problem for the fields.
@@ -83,6 +85,7 @@ class BaseFDEMSimulation(BaseEMSimulation):
             rhs = self.getRHS(freq)
             Ainv = self.Solver(A, **self.solver_opts)
             u = Ainv * rhs
+
             Srcs = self.survey.get_sources_by_frequency(freq)
             f[Srcs, self._solutionType] = u
             Ainv.clean()
@@ -166,13 +169,14 @@ class BaseFDEMSimulation(BaseEMSimulation):
 
                     df_dmT = df_dmT + du_dmT
 
+                    Jtv += np.array(df_dmT.squeeze(), dtype=complex).real
                     # TODO: this should be taken care of by the reciever?
-                    if rx.component == "real":
-                        Jtv += np.array(df_dmT, dtype=complex).real
-                    elif rx.component == "imag":
-                        Jtv += -np.array(df_dmT, dtype=complex).real
-                    else:
-                        raise Exception("Must be real or imag")
+                    # if rx.component == "real":
+                    #     Jtv += np.array(df_dmT, dtype=complex).real
+                    # elif rx.component == "imag":
+                    #     Jtv += -np.array(df_dmT, dtype=complex).real
+                    # else:
+                    #     raise Exception("Must be real or imag")
 
             ATinv.clean()
 
@@ -188,19 +192,25 @@ class BaseFDEMSimulation(BaseEMSimulation):
         :return: (s_m, s_e) (nE or nF, nSrc)
         """
         Srcs = self.survey.get_sources_by_frequency(freq)
+        n_fields = sum(src._fields_per_source for src in Srcs)
         if self._formulation == "EB":
-            s_m = np.zeros((self.mesh.nF, len(Srcs)), dtype=complex)
-            s_e = np.zeros((self.mesh.nE, len(Srcs)), dtype=complex)
+            s_m = np.zeros((self.mesh.nF, n_fields), dtype=complex)
+            s_e = np.zeros((self.mesh.nE, n_fields), dtype=complex)
         elif self._formulation == "HJ":
-            s_m = np.zeros((self.mesh.nE, len(Srcs)), dtype=complex)
-            s_e = np.zeros((self.mesh.nF, len(Srcs)), dtype=complex)
+            s_m = np.zeros((self.mesh.nE, n_fields), dtype=complex)
+            s_e = np.zeros((self.mesh.nF, n_fields), dtype=complex)
 
-        for i, src in enumerate(Srcs):
+        i = 0
+        for src in Srcs:
+            ii = i + src._fields_per_source
             smi, sei = src.eval(self)
-
-            s_m[:, i] = s_m[:, i] + smi
-            s_e[:, i] = s_e[:, i] + sei
-
+            if not isinstance(smi, Zero) and smi.ndim == 1:
+                smi = smi[:, None]
+            if not isinstance(sei, Zero) and sei.ndim == 1:
+                sei = sei[:, None]
+            s_m[:, i:ii] = s_m[:, i:ii] + smi
+            s_e[:, i:ii] = s_e[:, i:ii] + sei
+            i = ii
         return s_m, s_e
 
 

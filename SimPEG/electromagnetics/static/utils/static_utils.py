@@ -154,7 +154,7 @@ def electrode_separations(survey_object, electrode_pair="all", **kwargs):
     return elecSepDict
 
 
-def source_receiver_midpoints(survey, **kwargs):
+def source_receiver_midpoints(survey, tol=1e-2, **kwargs):
     """
     Calculates the pseudo-sensitivity locations for 2D and 3D surveys.
 
@@ -206,7 +206,7 @@ def source_receiver_midpoints(survey, **kwargs):
 
         midxy.append((Cmid + Pmid) / 2)
         diffs = np.linalg.norm((Cmid - Pmid), axis=1)
-        if np.allclose(diffs, 0.0):  # likely a wenner type survey.
+        if diffs < tol:  # likely a wenner type survey) .
             midz = zsrc - tx_sep / 2 * np.ones_like(diffs)
         else:
             midz.append(zsrc - diffs / 2)
@@ -988,6 +988,7 @@ def generate_dcip_sources_line(
             fun_interp = interp1d(topo[:, 0], topo[:, -1])
             P = np.c_[stn_x, fun_interp(stn_x)]
 
+
     # Build list of Tx-Rx locations depending on survey type
     # Dipole-dipole: Moving tx with [a] spacing -> [AB a MN1 a MN2 ... a MNn]
     # Pole-dipole: Moving pole on one end -> [A a MN1 a MN2 ... MNn a B]
@@ -1039,12 +1040,14 @@ def generate_dcip_sources_line(
 
 def writeUBC_DCobs(
     fileName,
-    data,
+    data_obj,
     dim,
     format_type,
     survey_type="dipole-dipole",
     ip_type=0,
     comment_lines="",
+    data=None,
+    predicted=False
 ):
     """
     Write UBC GIF DCIP 2D or 3D observation file
@@ -1062,7 +1065,7 @@ def writeUBC_DCobs(
     :rtype: file
     """
 
-    if not isinstance(data, Data):
+    if not isinstance(data_obj, Data):
         raise Exception(
             "A Data instance ({datacls}: <{datapref}.{datacls}>) must be "
             "provided as the second input. The provided input is a "
@@ -1073,6 +1076,18 @@ def writeUBC_DCobs(
                 providedpref=data.__module__,
             )
         )
+
+    if data is not None:
+        assert data.shape == data_obj.dobs.shape, f"Mismatch between data vector of shape {data.shape} and data obj with shape {data_obj.dobs.shape}."
+        dobs = data
+
+    else:
+        dobs = data_obj.dobs
+
+    if predicted:
+        data_block = np.c_[dobs, data_obj.dobs, data_obj.standard_deviation]
+    else:
+        data_block = np.c_[dobs, data_obj.standard_deviation]
 
     if not ((dim == 2) | (dim == 3)):
         raise Exception("""dim must be either 2 or 3""" " not {}".format(dim))
@@ -1105,7 +1120,7 @@ def writeUBC_DCobs(
         fid.write(comment_lines)
 
     if dim == 2:
-        fid.write("{:d}\n".format(data.survey.nSrc))
+        fid.write("{:d}\n".format(data_obj.survey.nSrc))
 
     if ip_type != 0:
         fid.write("IPTYPE=%i\n" % ip_type)
@@ -1114,7 +1129,7 @@ def writeUBC_DCobs(
 
     count = 0
 
-    for src in data.survey.source_list:
+    for src in data_obj.survey.source_list:
 
         rx = src.receiver_list[0].locations
         nD = src.nD
@@ -1155,8 +1170,7 @@ def writeUBC_DCobs(
                         B,
                         M,
                         N,
-                        data.dobs[count : count + nD],
-                        data.relative_error[count : count + nD],
+                        data_block[count : count + nD, :],
                     ],
                     delimiter=str(" "),
                     newline=str("\n"),
@@ -1193,8 +1207,7 @@ def writeUBC_DCobs(
                     np.c_[
                         M,
                         N,
-                        data.dobs[count : count + nD],
-                        data.relative_error[count : count + nD],
+                        data_block[count : count + nD, :],
                     ],
                     delimiter=str(" "),
                     newline=str("\n"),
@@ -1225,17 +1238,13 @@ def writeUBC_DCobs(
             fid.close()
 
             fid = open(fileName, "ab")
-            if isinstance(data.relative_error, np.ndarray):
+            if isinstance(data_obj.relative_error, np.ndarray):
                 np.savetxt(
                     fid,
                     np.c_[
                         M,
                         N,
-                        data.dobs[count : count + nD],
-                        (
-                            data.relative_error[count : count + nD]
-                            + data.noise_floor[count : count + nD]
-                        ),
+                        data_block[count : count + nD, :],
                     ],
                     fmt=str("%e"),
                     delimiter=str(" "),
@@ -1245,7 +1254,7 @@ def writeUBC_DCobs(
                 raise Exception(
                     """Uncertainities SurveyObject.std should be set.
                     Either float or nunmpy.ndarray is expected, """
-                    "not {}".format(type(data.relative_error))
+                    "not {}".format(type(data_obj.relative_error))
                 )
 
             fid.close()
@@ -1648,7 +1657,7 @@ def readUBC_DC3Dobs(fileName):
     zflag = True
     poletx = False
     polerx = False
-
+    tol = 1e-2
     # Countdown for number of obs/tx
     count = 0
     for ii in range(obsfile.shape[0]):
@@ -1664,7 +1673,7 @@ def readUBC_DC3Dobs(fileName):
             # Check if z value is provided, if False -> nan
             if len(temp) == 5:
                 # check if pole-dipole
-                if np.allclose(temp[0:2], temp[2:4]):
+                if np.linalg.norm(np.subtract(temp[0:2], temp[2:4])) < tol:
                     tx = np.r_[temp[0:2], np.nan]
                     poletx = True
 
@@ -1674,7 +1683,7 @@ def readUBC_DC3Dobs(fileName):
 
             else:
                 # check if pole-dipole
-                if np.allclose(temp[0:3], temp[3:6]):
+                if np.linalg.norm(np.subtract(temp[0:3], temp[3:6])) < tol:
                     tx = np.r_[temp[0:3]]
                     poletx = True
                     temp[2] = -temp[2]
@@ -1691,7 +1700,7 @@ def readUBC_DC3Dobs(fileName):
         if zflag:
 
             # Check if Pole Receiver
-            if np.allclose(temp[0:3], temp[3:6]):
+            if np.linalg.norm(np.subtract(temp[0:3], temp[3:6])) < tol:
                 polerx = True
                 # Flip z values
                 temp[2] = -temp[2]
@@ -1708,7 +1717,7 @@ def readUBC_DC3Dobs(fileName):
 
         else:
             # Check if Pole Receiver
-            if np.allclose(temp[0:2], temp[2:4]):
+            if np.linalg.norm(np.subtract(temp[0:2], temp[2:4])) < tol:
                 polerx = True
                 # Flip z values
                 rx.append(temp[:2])
@@ -1724,7 +1733,9 @@ def readUBC_DC3Dobs(fileName):
 
         # Reach the end of transmitter block
         if count == 0:
-            rx = np.asarray(rx)
+
+            rx = np.vstack(rx)
+
             if polerx:
                 Rx = dc.Rx.Pole(rx[:, :3])
             else:
@@ -1968,11 +1979,11 @@ def drapeTopotoLoc(mesh, pts, actind=None, option="top", topo=None):
         if mesh.dim == 3:
             uniqXYlocs, topoCC = gettopoCC(mesh, actind, option=option)
             inds = closestPointsGrid(uniqXYlocs, pts)
-            out = np.c_[uniqXYlocs[inds, :], topoCC[inds]]
+            out = np.c_[pts, topoCC[inds]]
         else:
             uniqXlocs, topoCC = gettopoCC(mesh, actind, option=option)
             inds = closestPointsGrid(uniqXlocs, pts, dim=1)
-            out = np.c_[uniqXlocs[inds], topoCC[inds]]
+            out = np.c_[pts, topoCC[inds]]
     else:
         raise NotImplementedError()
 

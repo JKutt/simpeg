@@ -3,7 +3,8 @@ from __future__ import print_function
 import numpy as np
 import scipy.sparse as sp
 from six import string_types
-
+from .simulation import LinearSimulation
+from .data_misfit import L2DataMisfit
 from .utils.solver_utils import SolverWrapI, Solver
 from .utils import (
     callHooks,
@@ -371,27 +372,48 @@ class Minimize(object):
         self.startup(x0)
         self.printInit()
 
-        if self.print_type != "ubc":
+        if self.debug:
             print("x0 has any nan: {:b}".format(np.any(np.isnan(x0))))
+
+        self.f, self.g, self.H = evalFunction(self.xc, return_g=True, return_H=True)
+        self.printIter()
+
         while True:
             self.doStartIteration()
-            self.f, self.g, self.H = evalFunction(self.xc, return_g=True, return_H=True)
-            self.printIter()
+
             if self.stoppingCriteria():
                 break
             self.searchDirection = self.findSearchDirection()
-            del (
-                self.H
-            )  #: Doing this saves memory, as it is not needed in the rest of the computations.
+            # del (
+            #     self.H
+            # )  #: Doing this saves memory, as it is not needed in the rest of the computations.
             p = self.scaleSearchDirection(self.searchDirection)
             xt, passLS = self.modifySearchDirection(p)
             if not passLS:
                 xt, caught = self.modifySearchDirectionBreak(p)
                 if not caught:
                     return self.xc
-            self.doEndIteration(xt)
+
             if self.stopNextIteration:
                 break
+
+            if isinstance(self.parent.dmisfit, L2DataMisfit):
+                if not isinstance(self.parent.dmisfit.simulation, LinearSimulation):
+                    if hasattr(self.parent.dmisfit.simulation, "_Jmatrix"):
+                        self.parent.dmisfit.simulation._Jmatrix = None
+                    if hasattr(self.parent.dmisfit.simulation, "gtgdiag"):
+                        self.parent.dmisfit.simulation.gtgdiag = None
+            else:
+                for objfct in self.parent.dmisfit.objfcts:
+                    if not isinstance(objfct.simulation, LinearSimulation):
+                        if hasattr(objfct.simulation, "_Jmatrix"):
+                            objfct.simulation._Jmatrix = None
+                        if hasattr(objfct.simulation, "gtgdiag"):
+                            objfct.simulation.gtgdiag = None
+
+            self.f, self.g, self.H = evalFunction(xt, return_g=True, return_H=True)
+            self.doEndIteration(xt)
+            self.printIter()
 
         self.printDone()
         self.finish()
@@ -972,7 +994,7 @@ class BFGS(Minimize, Remember):
         if k < 0:
             d = self.bfgsH0 * d  # Assume that bfgsH0 is a SimPEG.Solver
         else:
-            khat = 0 if nn is 0 else np.mod(n - nn + k, nn)
+            khat = 0 if nn == 0 else np.mod(n - nn + k, nn)
             gamma = np.vdot(S[:, khat], d) / np.vdot(Y[:, khat], S[:, khat])
             d = d - gamma * Y[:, khat]
             d = self.bfgsrec(k - 1, n, nn, S, Y, d)
@@ -987,7 +1009,7 @@ class BFGS(Minimize, Remember):
         return self.bfgs(-self.g)
 
     def _doEndIteration_BFGS(self, xt):
-        if self.iter is 0:
+        if self.iter == 0:
             self.g_last = self.g
             return
 

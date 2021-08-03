@@ -93,7 +93,7 @@ class BaseRx(survey.BaseRx):
             PTv_real = P.T * v
 
             if self.component == "imag":
-                PTv = 1j * PTv_real
+                PTv = -1j * PTv_real
             elif self.component == "real":
                 PTv = PTv_real.astype(complex)
             else:
@@ -128,7 +128,7 @@ class PointMagneticFluxDensity(BaseRx):
     """
 
     def __init__(self, locations, orientation="x", component="real"):
-        self.projField = "b"
+        self.projField = "h"
         super(PointMagneticFluxDensity, self).__init__(
             locations, orientation, component
         )
