@@ -20,7 +20,7 @@ from SimPEG import (
     data
 )
 from SimPEG.electromagnetics.static import resistivity as dc, utils as DCutils
-from dask.distributed import Client, LocalCluster
+from dask.distributed import Client, LocalCluster, SSHCluster
 from dask import config
 from SimPEG.utils.drivers import create_tile_meshes, create_nested_mesh
 import numpy as np
@@ -93,8 +93,14 @@ def create_tile_dc(source, obs, uncert, global_mesh, global_active, tile_id):
 def run():
     print("fucka ya")
     # mkl_set_num_threads(1)
+    cluster = SSHCluster(
+        ["localhost", "localhost", "localhost", "localhost"],
+        connect_options={"known_hosts": None},
+        worker_options={"nthreads": 2},
+        scheduler_options={"port": 0, "dashboard_address": ":8797"}
+    )
     cluster = LocalCluster(processes=True)
-    cluster.scale(12)
+    # cluster.scale(12)
     # print(cluster.workers)
     client = Client(cluster)
 

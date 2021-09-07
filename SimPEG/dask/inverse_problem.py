@@ -125,7 +125,7 @@ def get_dpred(self, m, f=None, compute_J=False):
                     vec = m
                  
                 future = client.compute(
-                    objfct.simulation. nnnnnnn(
+                    objfct.simulation.dpred(
                         vec, compute_J=compute_J and (objfct.simulation._Jmatrix is None)
                     ), workers=None
                 )
