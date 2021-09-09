@@ -123,7 +123,7 @@ def get_dpred(self, m, f=None, compute_J=False):
                     vec = objfct.model_map @ m
                 else:
                     vec = m
-                 
+                print("launching compute")
                 future = client.compute(
                     objfct.simulation.dpred(
                         vec, compute_J=compute_J and (objfct.simulation._Jmatrix is None)
@@ -135,14 +135,18 @@ def get_dpred(self, m, f=None, compute_J=False):
                 dpreds += []
 
     if isinstance(dpreds[0], Future):
-        dpreds = client.gather(dpreds)
-        preds = []
-        if isinstance(dpreds[0], tuple):  # Jmatrix was computed
-            for future, objfct in zip(dpreds, self.dmisfit.objfcts):
-                preds += [future[0]]
-                objfct.simulation._Jmatrix = future[1]
+        for future, objfct in zip(dpreds, self.dmisfit.objfcts):
+            print("doing future work")
+            future.result()
+                # objfct.simulation._Jmatrix = future[1]
+        # dpreds = client.gather(dpreds)
+        # preds = []
+        # if isinstance(dpreds[0], tuple):  # Jmatrix was computed
+        #     for future, objfct in zip(dpreds, self.dmisfit.objfcts):
+        #         preds += [future[0]]
+        #         objfct.simulation._Jmatrix = future[1]
 
-            return preds
+        #     return preds
     return dpreds
 
 
