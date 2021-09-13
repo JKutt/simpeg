@@ -93,6 +93,8 @@ def _getFields(instruct):
 # BaseInvProblem.formJ = dask_formJ
 def get_fields(self, m):
     # client = get_client()
+    comm = MPI.COMM_WORLD
+    rank = comm.Get_rank()
     fields = []
 
     for i, objfct in enumerate(self.dmisfit.objfcts):
