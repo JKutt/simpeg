@@ -14,6 +14,7 @@ from ..electromagnetics.static import resistivity as dc
 import DCIPtools as DCIP
 import discretize
 from pymatsolver import Pardiso as Solver
+from mpi4py import MPI
 
 
 
@@ -91,19 +92,26 @@ def _getFields(instruct):
 
 # BaseInvProblem.formJ = dask_formJ
 def get_fields(self, m):
-    client = get_client()
+    # client = get_client()
+    fields = []
 
-    # for i, objfct in enumerate(self.dmisfit.objfcts):
-    #     if objfct.model_map is not None:
-    #         vec = objfct.model_map @ m
-    #     else:
-    #         vec = m
-    #     objfct.simulation.model = vec
-    print("[info] submit instuction")
-    futures = [client.submit(_getFields, instruction) for instruction in self.dmisfit.lite_simulations]
-    print('[info] gather time')
+    for i, objfct in enumerate(self.dmisfit.objfcts):
+        if objfct.model_map is not None:
+            vec = objfct.model_map @ m
+        else:
+            vec = m
+        objfct.simulation.model = vec
+    objfct = comm.scatter(self.dmisfit.lite_simulations, root=0)
+    fields += [_getFields(objfct)]
 
-    return client.gather(futures)
+    future = comm.gather(fields, root=0)
+
+    return future
+    # print("[info] submit instuction")
+    # futures = [client.submit(_getFields, instruction) for instruction in self.dmisfit.lite_simulations]
+    # print('[info] gather time')
+
+    # return client.gather(futures)
 
 
 BaseInvProblem.get_fields = get_fields
