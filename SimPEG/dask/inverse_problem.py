@@ -11,7 +11,7 @@ from ..objective_function import BaseObjectiveFunction
 from .. import maps
 import os
 from ..electromagnetics.static import resistivity as dc
-import DCIPtools as DCIP
+from . import DCIPtools as DCIP
 import discretize
 from pymatsolver import Pardiso as Solver
 from mpi4py import MPI
