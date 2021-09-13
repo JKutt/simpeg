@@ -92,28 +92,28 @@ def _getFields(instruct):
 
 # BaseInvProblem.formJ = dask_formJ
 def get_fields(self, m):
-    # client = get_client()
-    comm = MPI.COMM_WORLD
-    rank = comm.Get_rank()
-    fields = []
+    client = get_client()
+    # comm = MPI.COMM_WORLD
+    # rank = comm.Get_rank()
+    # fields = []
 
-    for i, objfct in enumerate(self.dmisfit.objfcts):
-        if objfct.model_map is not None:
-            vec = objfct.model_map @ m
-        else:
-            vec = m
-        objfct.simulation.model = vec
-    objfct = comm.scatter(self.dmisfit.lite_simulations, root=0)
-    fields += [_getFields(objfct)]
+    # for i, objfct in enumerate(self.dmisfit.objfcts):
+    #     if objfct.model_map is not None:
+    #         vec = objfct.model_map @ m
+    #     else:
+    #         vec = m
+    #     objfct.simulation.model = vec
+    # objfct = comm.scatter(self.dmisfit.lite_simulations, root=0)
+    # fields += [_getFields(objfct)]
 
-    future = comm.gather(fields, root=0)
+    # future = comm.gather(fields, root=0)
 
-    return future
-    # print("[info] submit instuction")
-    # futures = [client.submit(_getFields, instruction) for instruction in self.dmisfit.lite_simulations]
-    # print('[info] gather time')
+    # return future
+    print("[info] submit instuction")
+    futures = [client.submit(_getFields, instruction) for instruction in self.dmisfit.lite_simulations]
+    print('[info] gather time')
 
-    # return client.gather(futures)
+    return client.gather(futures)
 
 
 BaseInvProblem.get_fields = get_fields
