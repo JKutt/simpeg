@@ -11,6 +11,7 @@ try:
     import SimPEG.dask.data_misfit
     import SimPEG.dask.optimization
     import SimPEG.dask.inverse_problem
+    import SimPEG.dask.DCIPtools
 
 except ImportError as err:
     print("unable to load dask operations")
