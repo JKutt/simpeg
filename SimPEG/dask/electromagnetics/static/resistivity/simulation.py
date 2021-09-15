@@ -90,20 +90,25 @@ Sim.Jtvec = dask_Jtvec
 
 
 def compute_J(self, f=None, Ainv=None):
+    """
+        Compute the full sensitivity matrix to zarr
+    """
 
     if f is None:
         f, Ainv = self.fields(self.model, return_Ainv=True)
+
+    if os.path.exists(self.sensitivity_path):
+        shutil.rmtree(self.sensitivity_path, ignore_errors=True)
+
+        # Wait for the system to clear out the directory
+        while os.path.exists(self.sensitivity_path):
+            pass
 
     m_size = self.model.size
     row_chunks = int(np.ceil(
         float(self.survey.nD) / np.ceil(float(m_size) * self.survey.nD * 8. * 1e-6 / self.max_chunk_size)
     ))
-    Jmatrix = zarr.open(
-        self.sensitivity_path + f"J.zarr",
-        mode='w',
-        shape=(self.survey.nD, m_size),
-        chunks=(row_chunks, m_size)
-    )
+    blockname = self.sensitivity_path + f"J.zarr"
 
     blocks = []
     count = 0
@@ -114,45 +119,25 @@ def compute_J(self, f=None, Ainv=None):
 
             PTv = rx.getP(self.mesh, rx.projGLoc(f)).toarray().T
 
-            for dd in range(int(np.ceil(PTv.shape[1] / row_chunks))):
-                start, end = dd*row_chunks, np.min([(dd+1)*row_chunks, PTv.shape[1]])
-                df_duTFun = getattr(f, "_{0!s}Deriv".format(rx.projField), None)
-                df_duT, df_dmT = df_duTFun(source, None, PTv[:, start:end], adjoint=True)
-                ATinvdf_duT = Ainv * df_duT
-                dA_dmT = self.getADeriv(u_source, ATinvdf_duT, adjoint=True)
-                dRHS_dmT = self.getRHSDeriv(source, ATinvdf_duT, adjoint=True)
-                du_dmT = -dA_dmT
-                if not isinstance(dRHS_dmT, Zero):
-                    du_dmT += dRHS_dmT
-                if not isinstance(df_dmT, Zero):
-                    du_dmT += df_dmT
+            df_duTFun = getattr(f, "_{0!s}Deriv".format(rx.projField), None)
+            df_duT, df_dmT = df_duTFun(source, None, PTv, adjoint=True)
+            ATinvdf_duT = Ainv * df_duT
+            dA_dmT = self.getADeriv(u_source, ATinvdf_duT, adjoint=True)
+            dRHS_dmT = self.getRHSDeriv(source, ATinvdf_duT, adjoint=True)
+            du_dmT = -dA_dmT
+            if not isinstance(dRHS_dmT, Zero):
+                du_dmT += dRHS_dmT
+            if not isinstance(df_dmT, Zero):
+                du_dmT += df_dmT
 
-                #
-                du_dmT = du_dmT.T.reshape((-1, m_size))
+            du_dmT = du_dmT.T.reshape((-1, m_size))
+            blocks.append(du_dmT)
+            count += 1
 
-                if len(blocks) == 0:
-                    blocks = du_dmT
-                else:
-                    blocks = np.vstack([blocks, du_dmT])
+            del df_duT, ATinvdf_duT, dA_dmT, dRHS_dmT, du_dmT
 
-                while blocks.shape[0] >= row_chunks:
-                    Jmatrix.set_orthogonal_selection(
-                        (np.arange(count, count + row_chunks), slice(None)),
-                        blocks[:row_chunks, :].astype(np.float32)
-                    )
-
-                    blocks = blocks[row_chunks:, :].astype(np.float32)
-                    count += row_chunks
-
-                del df_duT, ATinvdf_duT, dA_dmT, dRHS_dmT, du_dmT
-
-    if len(blocks) != 0:
-        Jmatrix.set_orthogonal_selection(
-            (np.arange(count, self.survey.nD), slice(None)),
-            blocks.astype(np.float32)
-        )
-
-    del Jmatrix
+    blocks = da.vstack(blocks)
+    da.to_zarr((blocks).rechunk("auto"), blockname)
     Ainv.clean()
 
     return da.from_zarr(self.sensitivity_path + f"J.zarr")
