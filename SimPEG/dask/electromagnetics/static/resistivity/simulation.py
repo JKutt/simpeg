@@ -21,13 +21,17 @@ def dask_fields(self, m=None, return_Ainv=False):
     if m is not None:
         self.model = m
 
-
+    print("get A")
     A = self.getA()
+    print("get Ainv")
     Ainv = self.solver(A, **self.solver_opts)
+    print("get rhs")
     RHS = self.getRHS()
 
     f = self.fieldsPair(self, shape=RHS.shape)
+    print("multi")
     f[:, self._solutionType] = Ainv * RHS
+    print("multi done")
 
     Ainv.clean()
 
