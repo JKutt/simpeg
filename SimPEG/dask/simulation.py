@@ -70,7 +70,7 @@ def make_synthetic_data(
     #         f = f.compute()
 
     client = get_client()
-    dclean = self.dpred(m, f=f).compute()
+    dclean = client.compute(self.dpred(m, f=f)).result()
 
     if add_noise is True:
         std = relative_error * abs(dclean) + noise_floor
