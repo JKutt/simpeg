@@ -10,28 +10,95 @@ import zarr
 import os
 import shutil
 import numcodecs
-from numba import jit
 
 numcodecs.blosc.use_threads = False
 
 Sim.sensitivity_path = './sensitivity/'
+Sim.cluster_worker_ids = []
+
+
+def workerRequest(outputs,liteSim,host, index):
+    """
+        A basic method for handling worker communications
+    """
+    
+    # construct the request message to be sent to the worker
+    message_to = simlite["request"] + "!" + json.dumps(simlite)
+    
+    # construct final message that contains server instruction for size of data
+    msg = struct.pack('>I', len(message_to)) + message_to.encode('utf-8')
+    
+    # create client socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(2)
+
+    # connect to remote host
+    try :
+        s.connect((host.split(":")[0], int(host.split(":")[1])))
+    
+        # send that data
+        s.sendall(msg)
+
+        # initiate the listening control variable
+        listening = True
+        while listening:
+            
+            #create the socket list
+            socket_list = [0, s]
+
+            # Get the list sockets which are readable
+            ready_to_read,ready_to_write,in_error = select.select(socket_list , [], [])
+
+            for sock in ready_to_read:             
+                if sock == s:
+                    # incoming message from remote server, s
+                    data = sock.recv(4096)
+
+                    if not data :
+                        print('\nDisconnected from chat server')
+                    
+                    # check what came back from server
+                    else :
+                        print(data.decode('utf-8'))
+                        
+                        # check if initialization is confirmed
+                        if "init" in data.decode('utf-8'):
+                            server_response = json.loads(data.decode('utf-8'))
+
+                            if server_response["init"] == True:
+                                listening = False
+                                
+                                # assign confirmation
+                                outputs[index] = server_response["init"]
+                        
+                        # check if predicted data is being sent back
+                        elif "predicted" in data.decode('utf-8'):                    
+                            server_response = json.loads(data.decode('utf-8'))
+                            
+                            # assign the data
+                            outputs[index] = np.asarray(server_response["predicted"])
+                            listening = False
+        
+        # close the socket
+        s.close()
+
+    except:
+        print("connection to worker failed")
+
+sim.worker = workerRequest
 
 
 def dask_fields(self, m=None, return_Ainv=False):
     if m is not None:
         self.model = m
 
-    print("get A")
+
     A = self.getA()
-    print("get Ainv")
     Ainv = self.solver(A, **self.solver_opts)
-    print("get rhs")
     RHS = self.getRHS()
 
     f = self.fieldsPair(self, shape=RHS.shape)
-    print("multi")
     f[:, self._solutionType] = Ainv * RHS
-    print("multi done")
 
     Ainv.clean()
 
@@ -70,10 +137,32 @@ def dask_Jvec(self, m, v):
         Compute sensitivity matrix (J) and vector (v) product.
     """
     self.model = m
-    if isinstance(self.Jmatrix, Future):
-        self.Jmatrix  # Wait to finish
+    # if isinstance(self.Jmatrix, Future):
+    #     self.Jmatrix  # Wait to finish
 
-    return da.dot(self.Jmatrix, v).astype(np.float32)
+    # return da.dot(self.Jmatrix, v).astype(np.float32)
+    # create the request stream
+    jvec_requests = {}
+    jvec_requests["request"] = 'jvec'
+    jvec_requests["vector"] = v.tolist()
+    
+    # get predicted data from workers
+    worker_threads = []
+    results = [None] * len(worker_threads)
+    cnt_host = 0
+    for address in self.cluster_worker_ids:
+        p = Thread(target=workerRequest, args=(results, jvec_requests, address, cnt_host))
+        p.start()
+        worker_threads += [p]
+        cnt_host += 1
+
+    # join the threads to retrieve data
+    for thread_ in worker_threads:
+        print("joining .......................")
+        thread_.join()
+    print("joining complete")
+    # contruct the predicted data vector
+    data = np.hstack(results)
 
 
 Sim.Jvec = dask_Jvec
@@ -84,35 +173,53 @@ def dask_Jtvec(self, m, v):
         Compute adjoint sensitivity matrix (J^T) and vector (v) product.
     """
     self.model = m
-    if isinstance(self.Jmatrix, Future):
-        self.Jmatrix  # Wait to finish
+    # if isinstance(self.Jmatrix, Future):
+    #     self.Jmatrix  # Wait to finish
 
-    return da.dot(v, self.Jmatrix).astype(np.float32)
+    # return da.dot(v, self.Jmatrix).astype(np.float32)
+
+    # create the request stream
+    jtvec_requests = {}
+    jtvec_requests["request"] = 'jtvec'
+    jvec_requests["vector"] = v.tolist()
+
+    # get predicted data from workers
+    worker_threads = []
+    results = [None] * len(worker_threads)
+    cnt_host = 0
+    for address in self.cluster_worker_ids:
+        p = Thread(target=workerRequest, args=(results, jtvec_requests, address, cnt_host))
+        p.start()
+        worker_threads += [p]
+        cnt_host += 1
+
+    # join the threads to retrieve data
+    for thread_ in worker_threads:
+        print("joining .......................")
+        thread_.join()
+
+    # contruct the predicted data vector
+    data = np.hstack(results)
 
 
 Sim.Jtvec = dask_Jtvec
 
 
 def compute_J(self, f=None, Ainv=None):
-    """
-        Compute the full sensitivity matrix to zarr
-    """
 
     if f is None:
         f, Ainv = self.fields(self.model, return_Ainv=True)
-
-    if os.path.exists(self.sensitivity_path):
-        shutil.rmtree(self.sensitivity_path, ignore_errors=True)
-
-        # Wait for the system to clear out the directory
-        while os.path.exists(self.sensitivity_path):
-            pass
 
     m_size = self.model.size
     row_chunks = int(np.ceil(
         float(self.survey.nD) / np.ceil(float(m_size) * self.survey.nD * 8. * 1e-6 / self.max_chunk_size)
     ))
-    blockname = self.sensitivity_path + f"J.zarr"
+    Jmatrix = zarr.open(
+        self.sensitivity_path + f"J.zarr",
+        mode='w',
+        shape=(self.survey.nD, m_size),
+        chunks=(row_chunks, m_size)
+    )
 
     blocks = []
     count = 0
@@ -123,25 +230,45 @@ def compute_J(self, f=None, Ainv=None):
 
             PTv = rx.getP(self.mesh, rx.projGLoc(f)).toarray().T
 
-            df_duTFun = getattr(f, "_{0!s}Deriv".format(rx.projField), None)
-            df_duT, df_dmT = df_duTFun(source, None, PTv, adjoint=True)
-            ATinvdf_duT = Ainv * df_duT
-            dA_dmT = self.getADeriv(u_source, ATinvdf_duT, adjoint=True)
-            dRHS_dmT = self.getRHSDeriv(source, ATinvdf_duT, adjoint=True)
-            du_dmT = -dA_dmT
-            if not isinstance(dRHS_dmT, Zero):
-                du_dmT += dRHS_dmT
-            if not isinstance(df_dmT, Zero):
-                du_dmT += df_dmT
+            for dd in range(int(np.ceil(PTv.shape[1] / row_chunks))):
+                start, end = dd*row_chunks, np.min([(dd+1)*row_chunks, PTv.shape[1]])
+                df_duTFun = getattr(f, "_{0!s}Deriv".format(rx.projField), None)
+                df_duT, df_dmT = df_duTFun(source, None, PTv[:, start:end], adjoint=True)
+                ATinvdf_duT = Ainv * df_duT
+                dA_dmT = self.getADeriv(u_source, ATinvdf_duT, adjoint=True)
+                dRHS_dmT = self.getRHSDeriv(source, ATinvdf_duT, adjoint=True)
+                du_dmT = -dA_dmT
+                if not isinstance(dRHS_dmT, Zero):
+                    du_dmT += dRHS_dmT
+                if not isinstance(df_dmT, Zero):
+                    du_dmT += df_dmT
 
-            du_dmT = du_dmT.T.reshape((-1, m_size))
-            blocks.append(du_dmT)
-            count += 1
+                #
+                du_dmT = du_dmT.T.reshape((-1, m_size))
 
-            del df_duT, ATinvdf_duT, dA_dmT, dRHS_dmT, du_dmT
+                if len(blocks) == 0:
+                    blocks = du_dmT
+                else:
+                    blocks = np.vstack([blocks, du_dmT])
 
-    blocks = da.vstack(blocks)
-    da.to_zarr((blocks).rechunk("auto"), blockname)
+                while blocks.shape[0] >= row_chunks:
+                    Jmatrix.set_orthogonal_selection(
+                        (np.arange(count, count + row_chunks), slice(None)),
+                        blocks[:row_chunks, :].astype(np.float32)
+                    )
+
+                    blocks = blocks[row_chunks:, :].astype(np.float32)
+                    count += row_chunks
+
+                del df_duT, ATinvdf_duT, dA_dmT, dRHS_dmT, du_dmT
+
+    if len(blocks) != 0:
+        Jmatrix.set_orthogonal_selection(
+            (np.arange(count, self.survey.nD), slice(None)),
+            blocks.astype(np.float32)
+        )
+
+    del Jmatrix
     Ainv.clean()
 
     return da.from_zarr(self.sensitivity_path + f"J.zarr")
@@ -152,7 +279,7 @@ Sim.compute_J = compute_J
 
 # This could technically be handled by dask.simulation, but doesn't seem to register
 @dask.delayed
-def dask_dpred(self, m, f=None, compute_J=False):
+def dask_dpred(self, m=None, f=None, compute_J=False):
     """
     dpred(m, f=None)
     Create the projected data from a model.
@@ -165,28 +292,38 @@ def dask_dpred(self, m, f=None, compute_J=False):
 
     Where P is a projection of the fields onto the data space.
     """
-    # if self.survey is None:
-    #     raise AttributeError(
-    #         "The survey has not yet been set and is required to compute "
-    #         "data. Please set the survey for the simulation: "
-    #         "simulation.survey = survey"
-    #     )
+    if self.survey is None:
+        raise AttributeError(
+            "The survey has not yet been set and is required to compute "
+            "data. Please set the survey for the simulation: "
+            "simulation.survey = survey"
+        )
 
-    # if f is None:
-    #     if m is None:
-    #         m = self.model
-    #     f, Ainv = self.fields(m, return_Ainv=compute_J)
-    # print(f)
-    # data = Data(self.survey)
-    # for src in self.survey.source_list:
-    #     for rx in src.receiver_list:
-    #         data[src, rx] = rx.eval(src, self.mesh, f)
+    # create the request stream
+    dpred_requests = {}
+    dpred_requests["request"] = 'dpred'
+    dpred_requests["compute_j"] = False
+    dpred_requests["model"] = m.tolist()
 
-    # if compute_J:
-    #     Jmatrix = self.compute_J(f=f, Ainv=Ainv)
-    #     return (mkvc(data), Jmatrix)
+    # get predicted data from workers
+    worker_threads = []
+    results = [None] * len(worker_threads)
+    cnt_host = 0
+    for address in self.cluster_worker_ids:
+        p = Thread(target=workerRequest, args=(results, dpred_requests, address, cnt_host))
+        p.start()
+        worker_threads += [p]
+        cnt_host += 1
 
-    return np.ones(self.survey.nD)
+    # join the threads to retrieve data
+    for thread_ in worker_threads:
+        print("joining .......................")
+        thread_.join()
+
+    # contruct the predicted data vector
+    data = np.hstack(results)
+
+    return mkvc(data)
 
 
 Sim.dpred = dask_dpred
