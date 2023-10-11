@@ -246,7 +246,7 @@ class L1DataMisfit(BaseDataMisfit):
         if np.all(R <= self.delta):
             return 0.5 * np.vdot(R, R)
         else:
-            self.delta * np.sum(R - 0.5 * self.delta)
+            return self.delta * np.sum(R - 0.5 * self.delta)
 
     @timeIt
     def deriv(self, m, f=None):
