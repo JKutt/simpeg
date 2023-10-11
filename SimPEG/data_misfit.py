@@ -220,3 +220,82 @@ class L2DataMisfit(BaseDataMisfit):
         return self.simulation.Jtvec_approx(
             m, self.W * (self.W * self.simulation.Jvec_approx(m, v, f=f)), f=f
         )
+    
+
+class L1DataMisfit(BaseDataMisfit):
+    r"""
+    The data misfit with an l_2 norm:
+
+    .. math::
+
+        \mu_\text{data} =
+            \frac{1}{2}
+            \left|
+                \mathbf{W}_d (\mathbf{d}_\text{pred} - \mathbf{d}_\text{obs})
+            \right|_2^2
+    """
+
+    delta = 1
+
+    @timeIt
+    def __call__(self, m, f=None):
+        "__call__(m, f=None)"
+
+        R = self.W * self.residual(m, f=f)
+
+        if np.all(R <= self.delta):
+            return 0.5 * np.vdot(R, R)
+        else:
+            self.delta * np.sum(R - 0.5 * self.delta)
+
+    @timeIt
+    def deriv(self, m, f=None):
+        r"""
+        Derivative of the data misfit
+
+        .. math::
+
+            \mathbf{J}^{\top} \mathbf{W}^{\top} \mathbf{W}
+            (\mathbf{d} - \mathbf{d}^{obs})
+
+        :param numpy.ndarray m: model
+        :param SimPEG.fields.Fields f: fields object
+        """
+
+        if f is None:
+            f = self.simulation.fields(m)
+
+        R = self.residual(m, f=f)
+        if np.all(R <= self.delta):
+            return self.simulation.Jtvec(
+                m, self.W.T * (self.W * R), f=f
+            )
+        else:
+            return np.sign(self.simulation.Jtvec(
+                m, self.W, f=f
+            ))
+
+    @timeIt
+    def deriv2(self, m, v, f=None):
+        r"""
+        Second derivative of the data misfit
+
+        .. math::
+
+            \mathbf{J}^{\top} \mathbf{W}^{\top} \mathbf{W} \mathbf{J}
+
+        :param numpy.ndarray m: model
+        :param numpy.ndarray v: vector
+        :param SimPEG.fields.Fields f: fields object
+        """
+
+        if f is None:
+            f = self.simulation.fields(m)
+
+        R = self.residual(m, f=f)
+        if np.all(R <= self.delta):
+            return self.simulation.Jtvec_approx(
+                m, self.W * (self.W * self.simulation.Jvec_approx(m, v, f=f)), f=f
+            )
+        else:
+            return np.zeros_like(m)
